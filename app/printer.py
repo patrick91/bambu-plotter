@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import paho.mqtt.client as mqtt
 
 from . import settings as settings_module
-from .settings import Settings
+from .settings import Calibration, Settings
 
 # Pretend there's a printer: G-code is logged instead of sent. Handy for trying
 # the app out, and for working on it without a printer nearby.
@@ -28,11 +28,10 @@ STALE_AFTER = 15.0
 
 Z_SPEED = 900.0
 
-# How many chunks of a plot can be queued on the printer at once.
-MAX_IN_FLIGHT = 4
-
-# An A1 mini answers "success" to bigger gcode_line messages but never runs
-# them: 1.9 KB worked, 2.9 KB was silently dropped. Stay well under that.
+# An A1 mini answers "success" to gcode_line messages it then never runs: a
+# 2.9 KB message into an idle printer, and 1.5 KB messages sent while others
+# were still queued. It seems to have one ~2 KB buffer for incoming G-code, so
+# plots are sent one message at a time, each well under that.
 MAX_MESSAGE_BYTES = 1500
 
 
@@ -137,9 +136,36 @@ class Printer:
         self._client = None
         self._last_report = None
         # Without a connection we can't trust anything we knew about the head:
-        # someone may have moved it by hand.
+        # someone may have moved it by hand. What we knew is still saved, and
+        # can be restored after reconnecting.
         self.x = self.y = self.z = None
         self.xy_homed = self.z_zeroed = False
+
+    def remember(self) -> None:
+        """Save where the head is, so a restart doesn't mean redoing the setup."""
+        calibration = Calibration(x=self.x, y=self.y, z=self.z, xy_homed=self.xy_homed, z_zeroed=self.z_zeroed)
+        if calibration != self.settings.calibration and (self.xy_homed or self.z_zeroed):
+            self.settings.calibration = calibration
+            settings_module.save(self.settings)
+
+    @property
+    def saved_calibration(self) -> Calibration | None:
+        """A calibration from before, when we don't have one now."""
+        c = self.settings.calibration
+        if c and (c.xy_homed or c.z_zeroed) and not (self.xy_homed or self.z_zeroed):
+            return c
+        return None
+
+    def restore_calibration(self) -> None:
+        c = self.saved_calibration
+        if c is None:
+            raise PrinterError("There's no previous position to restore")
+        self.x, self.y, self.z = c.x, c.y, c.z
+        self.xy_homed, self.z_zeroed = c.xy_homed, c.z_zeroed
+
+    def forget_calibration(self) -> None:
+        self.settings.calibration = None
+        settings_module.save(self.settings)
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         if reason_code.is_failure:
@@ -288,8 +314,22 @@ class Printer:
     def motors_off(self) -> None:
         self._check_idle()
         self.send("M18")
-        self.x = self.y = None
-        self.xy_homed = False
+        # With the motors off the head can be pushed around: nothing we knew
+        # about its position holds any more.
+        self.x = self.y = self.z = None
+        self.xy_homed = self.z_zeroed = False
+        self.forget_calibration()
+
+    def lift(self) -> None:
+        """Get the pen off the paper, whatever state we're in."""
+        if self.busy:
+            # Anything sent now could be dropped by the printer while it's
+            # busy; the job lifts the pen as soon as the current chunk is done.
+            self.stop_job()
+        elif self.z_zeroed:
+            self.pen(down=False)
+        else:
+            self.jog_z(5)
 
     # -- plotting -------------------------------------------------------------
 
@@ -305,7 +345,7 @@ class Printer:
     def stop_job(self) -> None:
         if self.busy and self.job is not None:
             self.job.status = "stopping"
-            self.job.message = "Finishing the lines already sent, then lifting the pen"
+            self.job.message = "Finishing the last few lines, then lifting the pen"
             self._stop_job.set()
 
     def _marker(self) -> int | None:
@@ -315,70 +355,27 @@ class Printer:
             return None
 
     def _run_job(self, job: Job, chunks: list[Chunk]) -> None:
-        """Feed the printer a few chunks at a time.
+        """Send the chunks one at a time.
 
         Each chunk ends with an `M73 P<n>` progress marker, which the printer
-        echoes back as `mc_percent` in its status report once it reaches it.
-        Keeping a few chunks queued means the printer never waits on us, while
-        a stop takes effect within a few chunks.
+        echoes back as `mc_percent` in its status report once it reads it.
+        Only then is the next chunk sent: the printer silently drops G-code
+        that arrives while its buffer is still full (see MAX_MESSAGE_BYTES).
         """
         first = (self._marker() or 0) + 1
         markers = [(first + i) % 99 + 1 for i in range(len(chunks))]
-        in_flight: list[int] = []  # chunk indexes sent but not confirmed
-        sequence_ids: dict[int, str] = {}
-        sent = 0
-        last_progress = time.time()
-        last_poll = 0.0
 
         try:
-            while True:
-                # Confirm chunks the printer has reached.
-                current = self._marker()
-                if in_flight and current is not None:
-                    for pos, index in enumerate(in_flight):
-                        if markers[index] == current:
-                            for done in in_flight[: pos + 1]:
-                                job.done_lines += len(chunks[done].lines)
-                                # Chunks end with the pen up, at a known spot.
-                                self.x, self.y = chunks[done].end
-                            del in_flight[: pos + 1]
-                            last_progress = time.time()
-                            break
-
-                if self._stop_job.is_set() and not in_flight:
+            for index, chunk in enumerate(chunks):
+                if self._stop_job.is_set():
                     break
-                if sent == len(chunks) and not in_flight:
-                    break
-
-                for index in in_flight:
-                    if reason := self.rejection(sequence_ids[index]):
-                        raise PrinterError(f"The printer refused the drawing commands: {reason}")
-
-                if not self._stop_job.is_set() and sent < len(chunks) and len(in_flight) < MAX_IN_FLIGHT:
-                    is_last = sent == len(chunks) - 1
-                    # Only the last chunk waits for motion before its marker, so
-                    # the job reads as done when the pen has actually stopped.
-                    tail = ["M400"] if is_last else []
-                    sequence_ids[sent] = self.send(*chunks[sent].lines, *tail, f"M73 P{markers[sent]} R0")
-                    in_flight.append(sent)
-                    sent += 1
-                    continue
-
-                if not self.connected:
-                    raise PrinterError("Lost connection to the printer mid-plot")
-                if time.time() - last_progress > 60:
-                    raise PrinterError(
-                        "The printer accepted the drawing commands but isn't running them"
-                        if job.done_lines == 0
-                        else "The printer stopped reporting progress"
-                    )
-
-                # Status reports come every few seconds on their own; ask for
-                # them more often so progress shows up promptly.
-                if time.time() - last_poll > 1.0:
-                    self.request_status()
-                    last_poll = time.time()
-                time.sleep(0.1)
+                # The last chunk waits for motion to finish before its marker,
+                # so the job reads as done when the pen has actually stopped.
+                tail = ["M400"] if index == len(chunks) - 1 else []
+                sequence_id = self.send(*chunk.lines, *tail, f"M73 P{markers[index]} R0")
+                self._wait_for_marker(markers[index], sequence_id, first_chunk=job.done_lines == 0)
+                job.done_lines += len(chunk.lines)
+                self.x, self.y = chunk.end
 
             stopped = self._stop_job.is_set()
             self.send("G90", f"G1 Z{self.settings.pen_up + 5:.2f} F{Z_SPEED:.0f}")
@@ -391,8 +388,36 @@ class Printer:
             # We don't know how far the printer got: re-home before trusting X/Y.
             self.x = self.y = None
             self.xy_homed = False
+            try:
+                self.send("G90", f"G1 Z{self.settings.pen_up + 5:.2f} F{Z_SPEED:.0f}")
+                self.z = self.settings.pen_up + 5
+                job.message += ". The pen has been lifted."
+            except PrinterError:
+                pass
         finally:
             job.finished_at = time.time()
+            self.remember()
+
+    def _wait_for_marker(self, marker: int, sequence_id: str, first_chunk: bool) -> None:
+        sent_at = time.time()
+        last_poll = 0.0
+        while self._marker() != marker:
+            if reason := self.rejection(sequence_id):
+                raise PrinterError(f"The printer refused the drawing commands: {reason}")
+            if not self.connected:
+                raise PrinterError("Lost connection to the printer mid-plot")
+            if time.time() - sent_at > 60:
+                raise PrinterError(
+                    "The printer accepted the drawing commands but isn't running them"
+                    if first_chunk
+                    else "The printer stopped reporting progress"
+                )
+            # Status reports come every few seconds on their own; ask for them
+            # more often so the next chunk goes out promptly.
+            if time.time() - last_poll > 0.5:
+                self.request_status()
+                last_poll = time.time()
+            time.sleep(0.05)
 
     # -- state for the UI ------------------------------------------------------
 
@@ -409,6 +434,7 @@ class Printer:
             "bed": {"width": w, "height": h, "model": s.model},
             "head": {"x": self.x, "y": self.y, "z": self.z},
             "xy_homed": self.xy_homed,
+            "saved_calibration": (c.model_dump() if (c := self.saved_calibration) else None),
             "z_zeroed": self.z_zeroed,
             "paper_top_left": s.paper_top_left.model_dump() if s.paper_top_left else None,
             "paper_bottom_right": s.paper_bottom_right.model_dump() if s.paper_bottom_right else None,

@@ -20,6 +20,20 @@ class Point(BaseModel):
     y: float
 
 
+class Calibration(BaseModel):
+    """Where the head was last known to be, and whether Z was set from the pen.
+
+    Only valid while the printer stays on with its motors engaged, so it's
+    offered back to you after a restart rather than trusted automatically.
+    """
+
+    x: float | None = None
+    y: float | None = None
+    z: float | None = None
+    xy_homed: bool = False
+    z_zeroed: bool = False
+
+
 class Settings(BaseModel):
     ip: str = ""
     serial: str = ""
@@ -41,6 +55,12 @@ class Settings(BaseModel):
 
     draw_speed: float = 3000.0  # mm/min
     travel_speed: float = 6000.0  # mm/min
+
+    calibration: Calibration | None = None
+
+    # The last drawing, so it's still there after a restart.
+    design: dict | None = None
+    upload_name: str | None = None
 
     @property
     def bed_size(self) -> tuple[float, float]:
@@ -64,6 +84,9 @@ def _import_bambucuts() -> Settings:
         serial=data.get("serial", ""),
         access_code=data.get("access_code", ""),
     )
+
+
+UPLOAD_PATH = CONFIG_PATH.with_name("upload")
 
 
 def load() -> Settings:

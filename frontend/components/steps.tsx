@@ -66,6 +66,7 @@ function Step({
           <span className={clsx("block font-semibold", status === "locked" ? "text-muted" : "text-ink")}>{title}</span>
           {summary && !open && <span className="block truncate text-xs text-muted">{summary}</span>}
         </span>
+        {status === "done" && !open && <span className="text-xs font-medium text-accent">Change</span>}
         {status !== "locked" && (
           <ChevronDown className={clsx("size-4 text-muted transition-transform", open && "rotate-180")} />
         )}
@@ -109,11 +110,28 @@ export function SetupSteps({ props }: { props: PageProps }) {
         onToggle={() => toggle(1)}
         summary="The printer knows where the pen is"
       >
+        {printer.saved_calibration && (
+          <div className="space-y-2 rounded-lg border border-line p-3">
+            <p className="text-sm">
+              <strong>Picking up where you left off?</strong> If the printer has stayed on and nobody has moved the head
+              or released the motors, you can keep the previous position
+              {printer.saved_calibration.z_zeroed && " and pen height"}.
+            </p>
+            <div className="flex gap-2">
+              <Button size="sm" variant="primary" onClick={() => act("/calibration/restore")}>
+                Keep previous set-up
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => act("/calibration/forget")}>
+                Start fresh
+              </Button>
+            </div>
+          </div>
+        )}
         <Instruction>
           <strong>Pen: leave it out for now.</strong> Clear the bed, then press Home. The head lifts 10 mm, finds its
           corner and comes back to the middle of the bed, so from now on the app knows exactly where it is.
         </Instruction>
-        <Button variant="primary" onClick={() => act("/home")} disabled={isBusy(printer)}>
+        <Button variant={printer.saved_calibration ? "secondary" : "primary"} onClick={() => act("/home")} disabled={isBusy(printer)}>
           <Home className="size-4" /> Home X and Y
         </Button>
       </Step>

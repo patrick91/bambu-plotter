@@ -1,6 +1,6 @@
 import { router, usePoll } from "@inertiajs/react";
 import clsx from "clsx";
-import { Camera, CircleAlert, CircleCheck, Info, PenLine, Play, Square, X } from "lucide-react";
+import { ArrowUpToLine, Camera, CircleAlert, CircleCheck, Info, PenLine, Play, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { BedView, isBusy } from "@/components/bed-view";
@@ -46,6 +46,11 @@ export default function Plotter(props: PageProps) {
         <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
           <div className="rounded-xl border border-line bg-surface p-4">
             <BedView printer={printer} preview={preview} />
+            <div className="mt-3 flex justify-end border-t border-line pt-3">
+              <Button onClick={() => act("/pen/lift")} disabled={!printer.connected || printer.job?.status === "stopping"}>
+                <ArrowUpToLine className="size-4" /> {isBusy(printer) ? "Stop and lift pen" : "Lift pen"}
+              </Button>
+            </div>
           </div>
           <PlotPanel props={props} />
           <PenPanel printer={printer} />
@@ -121,7 +126,7 @@ function PlotPanel({ props }: { props: PageProps }) {
             </div>
           </div>
           <Button variant="danger" onClick={() => act("/plot/stop")} disabled={job.status === "stopping"}>
-            <Square className="size-3.5" fill="currentColor" /> {job.status === "stopping" ? "Stopping…" : "Stop"}
+            <Square className="size-3.5" fill="currentColor" /> {job.status === "stopping" ? "Stopping…" : "Stop and lift pen"}
           </Button>
         </div>
         <div className="h-2 overflow-hidden rounded-full bg-sunken">

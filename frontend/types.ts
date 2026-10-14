@@ -17,6 +17,7 @@ export type PrinterState = {
   bed: { width: number; height: number; model: string };
   head: { x: number | null; y: number | null; z: number | null };
   xy_homed: boolean;
+  saved_calibration: { x: number | null; y: number | null; z: number | null; xy_homed: boolean; z_zeroed: boolean } | null;
   z_zeroed: boolean;
   paper_top_left: Point | null;
   paper_bottom_right: Point | null;

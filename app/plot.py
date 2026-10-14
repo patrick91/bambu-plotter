@@ -125,43 +125,59 @@ def paper_to_machine(top_left: Point, bottom_right: Point):
 def gcode_chunks(strokes: list[Stroke], settings: Settings) -> list[Chunk]:
     """G-code for the strokes, split into messages small enough for the printer.
 
-    A long stroke can be split across messages: the printer runs them back
-    to back, so the pen just keeps drawing.
+    Messages break between strokes, so the pen is up while the printer waits
+    for the next one. Only a stroke too long for one message is split, and
+    then the pen just pauses for a moment mid-line.
     """
     assert settings.paper_top_left and settings.paper_bottom_right
     to_bed = paper_to_machine(settings.paper_top_left, settings.paper_bottom_right)
     up, down = settings.pen_up, -settings.pen_pressure
 
-    # Each line with where the pen is once it has run.
-    lines: list[tuple[str, tuple[float, float]]] = []
-    pos = (0.0, 0.0)
-    lines += [("G90", pos), (f"G1 Z{up:.2f} F{Z_SPEED:.0f}", pos)]
+    # The G-code for each stroke, each line with where the pen is after it.
+    groups: list[list[tuple[str, tuple[float, float]]]] = []
     for stroke in strokes:
         points = [to_bed(x, y) for x, y in stroke]
         pos = points[0]
-        # G1 rather than G0 for travel, like Bambu Studio's own G-code.
-        lines.append((f"G1 X{pos[0]:.2f} Y{pos[1]:.2f} F{settings.travel_speed:.0f}", pos))
-        lines.append((f"G1 Z{down:.2f} F{Z_SPEED:.0f}", pos))
+        group = [
+            # G1 rather than G0 for travel, like Bambu Studio's own G-code.
+            (f"G1 X{pos[0]:.2f} Y{pos[1]:.2f} F{settings.travel_speed:.0f}", pos),
+            (f"G1 Z{down:.2f} F{Z_SPEED:.0f}", pos),
+        ]
         for i, pos in enumerate(points[1:]):
             # Feed rate is sticky, so only the first drawing move needs it.
             feed = f" F{settings.draw_speed:.0f}" if i == 0 else ""
-            lines.append((f"G1 X{pos[0]:.2f} Y{pos[1]:.2f}{feed}", pos))
-        lines.append((f"G1 Z{up:.2f} F{Z_SPEED:.0f}", pos))
+            group.append((f"G1 X{pos[0]:.2f} Y{pos[1]:.2f}{feed}", pos))
+        group.append((f"G1 Z{up:.2f} F{Z_SPEED:.0f}", pos))
+        groups.append(group)
 
-    budget = MAX_MESSAGE_BYTES - MARKER_BYTES
+    # Every message starts by making sure we're in absolute mode.
+    header = "G90"
+    budget = MAX_MESSAGE_BYTES - MARKER_BYTES - len(header) - 1
     chunks: list[Chunk] = []
-    current: list[str] = []
+    current: list[tuple[str, tuple[float, float]]] = []
     size = 0
-    end = pos
-    for line, after in lines:
-        if current and size + len(line) + 1 > budget:
-            chunks.append(Chunk(current, end))
-            current, size = [], 0
-        current.append(line)
-        size += len(line) + 1
-        end = after
-    if current:
-        chunks.append(Chunk(current, end))
+
+    def flush() -> None:
+        nonlocal current, size
+        if current:
+            chunks.append(Chunk([header] + [line for line, _ in current], current[-1][1]))
+        current, size = [], 0
+
+    first = [(f"G1 Z{up:.2f} F{Z_SPEED:.0f}", (0.0, 0.0))]
+    for group in [first, *groups]:
+        group_size = sum(len(line) + 1 for line, _ in group)
+        if size + group_size > budget:
+            flush()
+        if group_size <= budget:
+            current += group
+            size += group_size
+            continue
+        for line, pos in group:
+            if size + len(line) + 1 > budget:
+                flush()
+            current.append((line, pos))
+            size += len(line) + 1
+    flush()
     return chunks
 
 

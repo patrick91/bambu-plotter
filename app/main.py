@@ -48,11 +48,30 @@ class Design(BaseModel):
 
 
 class State:
-    design = Design()
-    upload: bytes | None = None
-    upload_name: str | None = None
-    notice: tuple[str, str] | None = None  # (kind, message)
-    _cache: tuple[object, list] | None = None
+    def __init__(self) -> None:
+        # Pick up the last drawing where we left off.
+        s = printer.settings
+        try:
+            self.design = Design.model_validate(s.design) if s.design else Design()
+        except ValueError:
+            self.design = Design()
+        self.upload: bytes | None = None
+        self.upload_name: str | None = None
+        if s.upload_name:
+            try:
+                self.upload, self.upload_name = settings_module.UPLOAD_PATH.read_bytes(), s.upload_name
+            except OSError:
+                pass
+        self.notice: tuple[str, str] | None = None  # (kind, message)
+        self._cache: tuple[object, list] | None = None
+        if not s.design:
+            # Even the random starting poem should still be there next time.
+            self.save_design()
+
+    def save_design(self) -> None:
+        printer.settings.design = self.design.model_dump()
+        printer.settings.upload_name = self.upload_name
+        settings_module.save(printer.settings)
 
 
 state = State()
@@ -164,6 +183,8 @@ def run(action, success: str | None = None) -> RedirectResponse:
         action()
     except PrinterError as e:
         return back("error", str(e))
+    finally:
+        printer.remember()
     return back("success", success) if success else back()
 
 
@@ -226,6 +247,23 @@ class Pen(BaseModel):
 @app.post("/pen")
 def pen(body: Pen):
     return run(lambda: printer.pen(body.down))
+
+
+@app.post("/pen/lift")
+def pen_lift():
+    busy = printer.busy
+    return run(printer.lift, "Stopping after the current few lines, then lifting the pen" if busy else None)
+
+
+@app.post("/calibration/restore")
+def calibration_restore():
+    return run(printer.restore_calibration, "Using the previous position and pen height")
+
+
+@app.post("/calibration/forget")
+def calibration_forget():
+    printer.forget_calibration()
+    return back()
 
 
 @app.post("/motors-off")
@@ -298,12 +336,14 @@ def save_settings(body: PenSettings):
 @app.post("/design")
 def update_design(body: Design):
     state.design = body
+    state.save_design()
     return back()
 
 
 @app.post("/design/poem")
 def new_poem():
     state.design = state.design.model_copy(update={"kind": "text", "text": design.random_poem()})
+    state.save_design()
     return back()
 
 
@@ -314,6 +354,9 @@ async def upload(file: Annotated[UploadFile, File()]):
     is_svg = name.lower().endswith(".svg") or (file.content_type or "").startswith("image/svg")
     state.upload, state.upload_name = data, name
     state.design = state.design.model_copy(update={"kind": "svg" if is_svg else "image"})
+    settings_module.UPLOAD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    settings_module.UPLOAD_PATH.write_bytes(data)
+    state.save_design()
     if is_svg and design.svg_has_text(data):
         return back(
             "warning",
