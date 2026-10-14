@@ -66,3 +66,31 @@ def test_chunks_fit_in_a_message_and_stay_on_paper():
 def test_clip_drops_what_is_off_the_paper():
     clipped = plot.clip([[(-5, 5), (5, 5), (10, 5), (200, 5)], [(500, 500), (501, 501)]], 100, 100)
     assert clipped == [[(5, 5), (10, 5)]]
+
+
+def test_transform_rotates_clockwise_around_the_centre():
+    square = [[(0, 0), (10, 0)]]
+    turned = plot.transform(square, rotation=90, scale=1, offset=(0, 0))
+    (ax, ay), (bx, by) = turned[0]
+    # A line pointing right now points down the page, around the same centre.
+    assert abs(ax - 5) < 1e-9 and abs(bx - 5) < 1e-9
+    assert by > ay
+
+
+def test_transform_scales_and_moves():
+    strokes = [[(0, 0), (10, 10)]]
+    moved = plot.transform(strokes, rotation=0, scale=2, offset=(3, -1))
+    assert plot.bounds(moved) == (-5 + 3, -5 - 1, 15 + 3, 15 - 1)
+
+
+def test_shading_styles_follow_the_image():
+    # Left half black, right half white.
+    img = np.full((200, 200), 255, np.uint8)
+    img[:, :100] = 0
+    data = cv2.imencode(".png", img)[1].tobytes()
+    for mode in design.TONAL_MODES:
+        strokes = design.image_strokes(data, width_mm=60, height_mm=60, mode=mode, spacing=1.0)
+        xs = [x for s in strokes for x, _ in s]
+        assert xs, mode
+        # Ink only on the dark half (allowing for the wiggle and blur).
+        assert max(xs) < 33, mode

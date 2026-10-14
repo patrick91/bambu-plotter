@@ -48,6 +48,21 @@ def place(
     return [[((x - x0) * scale + dx, (y - y0) * scale + dy) for x, y in s] for s in strokes]
 
 
+def transform(strokes: list[Stroke], *, rotation: float, scale: float, offset: tuple[float, float]) -> list[Stroke]:
+    """Rotate (degrees, clockwise on the page) and scale around the drawing's centre, then move it."""
+    if not rotation and scale == 1 and offset == (0, 0):
+        return strokes
+    x0, y0, x1, y1 = bounds(strokes)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    # y points down on paper, so a positive angle turns clockwise.
+    a = math.radians(rotation)
+    cos, sin = math.cos(a) * scale, math.sin(a) * scale
+    dx, dy = cx + offset[0], cy + offset[1]
+    return [
+        [((x - cx) * cos - (y - cy) * sin + dx, (x - cx) * sin + (y - cy) * cos + dy) for x, y in s] for s in strokes
+    ]
+
+
 def clip(strokes: list[Stroke], paper_w: float, paper_h: float) -> list[Stroke]:
     """Drop anything off the paper, so the pen never draws on the bed."""
     result: list[Stroke] = []
@@ -63,6 +78,15 @@ def clip(strokes: list[Stroke], paper_w: float, paper_h: float) -> list[Stroke]:
         if len(current) > 1:
             result.append(current)
     return result
+
+
+def center(strokes: list[Stroke], paper_w: float, paper_h: float) -> list[Stroke]:
+    """Move strokes to the middle of the paper, keeping their size."""
+    if not strokes:
+        return []
+    x0, y0, x1, y1 = bounds(strokes)
+    dx, dy = (paper_w - (x0 + x1)) / 2, (paper_h - (y0 + y1)) / 2
+    return [[(x + dx, y + dy) for x, y in s] for s in strokes]
 
 
 def order(strokes: list[Stroke]) -> list[Stroke]:
@@ -106,9 +130,13 @@ def length(strokes: list[Stroke]) -> tuple[float, float]:
 def estimate_seconds(strokes: list[Stroke], settings: Settings) -> float:
     draw, travel = length(strokes)
     lifts = len(strokes) * 2 * (settings.pen_up + settings.pen_pressure) / Z_SPEED * 60
+    # Messages go one at a time, with a wait of about a second between them
+    # for the printer to confirm. Each G-code line is ~20 bytes.
+    points = sum(len(s) for s in strokes)
+    messages = (points * 20 + len(strokes) * 60) / (MAX_MESSAGE_BYTES - MARKER_BYTES)
     # Acceleration means real moves are slower than the feed rate suggests,
     # especially lots of short ones; 1.3 is a rough correction.
-    return 1.3 * (draw / settings.draw_speed * 60 + travel / settings.travel_speed * 60) + lifts
+    return 1.3 * (draw / settings.draw_speed * 60 + travel / settings.travel_speed * 60) + lifts + messages
 
 
 def paper_to_machine(top_left: Point, bottom_right: Point):

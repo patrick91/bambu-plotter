@@ -41,10 +41,22 @@ class Design(BaseModel):
     align: Literal["left", "center", "right"] = "left"
     margin: float = 12.0
     fit: bool = True
-    image_mode: Literal["outline", "fill", "edges"] = "outline"
+    image_mode: Literal["outline", "fill", "edges", "spiral", "circles", "squiggle", "crosshatch"] = "outline"
     threshold: int = 128
     invert: bool = False
     spacing: float = 0.8
+    gamma: float = 1.0
+
+    # Where the drawing sits on the paper, on top of the automatic layout.
+    rotation: float = 0.0  # degrees, clockwise
+    scale: float = 100.0  # percent
+    offset_x: float = 0.0  # mm
+    offset_y: float = 0.0  # mm
+
+    def layout_key(self) -> str:
+        """Everything except the position, which is cheap to apply."""
+        sideways = 45 < abs(self.rotation) % 180 < 135
+        return self.model_dump_json(exclude={"rotation", "scale", "offset_x", "offset_y"}) + str(sideways)
 
 
 class State:
@@ -93,11 +105,34 @@ def paper_size() -> tuple[float, float]:
     return DEFAULT_PAPER
 
 
-def strokes_on_paper() -> list[design.Stroke]:
-    """The current design, laid out on the paper and ordered for drawing."""
+def strokes_on_paper() -> tuple[list[design.Stroke], bool]:
+    """The current design on the paper, ordered for drawing.
+
+    Also says whether some of it was cut off for being outside the paper.
+    """
     d = state.design
     paper_w, paper_h = paper_size()
-    key = (d.model_dump_json(), paper_w, paper_h, id(state.upload))
+    placed = laid_out(paper_w, paper_h)
+    if not placed:
+        return [], False
+    scale = d.scale / 100
+    if d.kind != "text":
+        # At 100% a picture fills the paper whichever way it's turned. Text
+        # keeps its letter size instead.
+        turned = plot.transform(placed, rotation=d.rotation, scale=1, offset=(0, 0))
+        x0, y0, x1, y1 = plot.bounds(turned)
+        room_w, room_h = paper_w - 2 * d.margin, paper_h - 2 * d.margin
+        scale *= min(1.0, room_w / max(x1 - x0, 1e-6), room_h / max(y1 - y0, 1e-6))
+    moved = plot.transform(placed, rotation=d.rotation, scale=scale, offset=(d.offset_x, d.offset_y))
+    x0, y0, x1, y1 = plot.bounds(moved)
+    overflow = x0 < -0.5 or y0 < -0.5 or x1 > paper_w + 0.5 or y1 > paper_h + 0.5
+    return plot.order(plot.clip(moved, paper_w, paper_h)), overflow
+
+
+def laid_out(paper_w: float, paper_h: float) -> list[design.Stroke]:
+    """The design placed on the paper by the automatic layout. Cached: tracing images is slow."""
+    d = state.design
+    key = (d.layout_key(), paper_w, paper_h, id(state.upload))
     if state._cache and state._cache[0] == key:
         return state._cache[1]
 
@@ -119,31 +154,34 @@ def strokes_on_paper() -> list[design.Stroke]:
         strokes = design.svg_strokes(state.upload)
         placed = plot.place(strokes, paper_w=paper_w, paper_h=paper_h, margin=d.margin, fit=d.fit)
     else:
+        # Turned sideways, an image has the paper's height to fill across.
+        sideways = 45 < abs(d.rotation) % 180 < 135
         strokes = design.image_strokes(
             state.upload,
-            width_mm=room_w,
-            height_mm=room_h,
+            width_mm=room_h if sideways else room_w,
+            height_mm=room_w if sideways else room_h,
             mode=d.image_mode,
             threshold=d.threshold,
             invert=d.invert,
             spacing=d.spacing,
+            gamma=d.gamma,
         )
-        placed = plot.place(strokes, paper_w=paper_w, paper_h=paper_h, margin=d.margin, fit=True)
+        # Already traced at the right size; the rotation-aware fit happens later.
+        placed = plot.center(strokes, paper_w, paper_h)
 
-    result = plot.order(plot.clip(placed, paper_w, paper_h))
-    state._cache = (key, result)
-    return result
+    state._cache = (key, placed)
+    return placed
 
 
 def preview() -> dict:
     paper_w, paper_h = paper_size()
     try:
-        strokes = strokes_on_paper()
+        strokes, overflow = strokes_on_paper()
     except Exception as e:  # noqa: BLE001 - show any tracing error next to the design
         return {"d": "", "width": paper_w, "height": paper_h, "error": str(e), "strokes": 0}
     draw, _ = plot.length(strokes)
-    overflow = bool(strokes) and plot.bounds(strokes)[3] > paper_h - state.design.margin + 0.5
     return {
+        "bounds": plot.bounds(strokes) if strokes else None,
         "d": plot.preview_path(strokes),
         "width": paper_w,
         "height": paper_h,
@@ -371,7 +409,7 @@ def plot_start():
     s = printer.settings
     if not (s.paper_top_left and s.paper_bottom_right):
         return back("error", "Mark the paper first")
-    strokes = strokes_on_paper()
+    strokes, _ = strokes_on_paper()
     if not strokes:
         return back("error", "There's nothing to draw yet")
     name = state.upload_name if state.design.kind != "text" else state.design.text.strip().split("\n")[0][:40]

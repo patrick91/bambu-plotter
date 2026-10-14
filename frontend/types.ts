@@ -36,15 +36,21 @@ export type Design = {
   align: "left" | "center" | "right";
   margin: number;
   fit: boolean;
-  image_mode: "outline" | "fill" | "edges";
+  image_mode: "outline" | "fill" | "edges" | "spiral" | "circles" | "squiggle" | "crosshatch";
   threshold: number;
   invert: boolean;
   spacing: number;
+  gamma: number;
+  rotation: number;
+  scale: number;
+  offset_x: number;
+  offset_y: number;
   upload_name: string | null;
 };
 
 export type Preview = {
   d: string;
+  bounds?: [number, number, number, number] | null;
   width: number;
   height: number;
   strokes: number;

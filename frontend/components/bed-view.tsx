@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Preview, PrinterState } from "@/types";
 
@@ -8,10 +8,22 @@ import { act } from "./ui";
  * The bed seen from above, with the front of the printer at the bottom.
  * Machine Y grows towards the back, so screen y = height - machine y.
  */
-export function BedView({ printer, preview }: { printer: PrinterState; preview: Preview }) {
+export function BedView({
+  printer,
+  preview,
+  onMoveDrawing,
+}: {
+  printer: PrinterState;
+  preview: Preview;
+  onMoveDrawing: (dx: number, dy: number) => void;
+}) {
   const { width: W, height: H } = printer.bed;
   const svgRef = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
+  // While dragging, the drawing follows the pointer before the server catches up.
+  const [drag, setDrag] = useState<{ start: { x: number; y: number }; dx: number; dy: number } | null>(null);
+  const [pending, setPending] = useState<{ dx: number; dy: number } | null>(null);
+  useEffect(() => setPending(null), [preview.d]);
 
   const canMove = printer.connected && printer.xy_homed && !isBusy(printer);
   const { x, y } = printer.head;
@@ -35,6 +47,13 @@ export function BedView({ printer, preview }: { printer: PrinterState; preview: 
   }
 
   const penDown = printer.head.z !== null && printer.head.z <= 0.05;
+
+  // Pointer movement on the bed, in paper millimetres.
+  function paperDelta(from: { x: number; y: number }, to: { x: number; y: number }) {
+    return { dx: (to.x - from.x) * sx, dy: (to.y - from.y) * sy };
+  }
+  const shift = drag ?? pending ?? { dx: 0, dy: 0 };
+  const b = preview.bounds;
 
   return (
     <div className="relative">
@@ -84,15 +103,48 @@ export function BedView({ printer, preview }: { printer: PrinterState; preview: 
             strokeDasharray={paperMarked ? undefined : "3 2"}
             opacity={paperMarked ? 1 : 0.85}
           />
-          <path
-            d={preview.d}
-            fill="none"
-            stroke="var(--color-ink-line)"
-            strokeWidth={0.35}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            opacity={paperMarked ? 1 : 0.5}
-          />
+          <g transform={`translate(${shift.dx} ${shift.dy})`}>
+            <path
+              d={preview.d}
+              fill="none"
+              stroke="var(--color-ink-line)"
+              strokeWidth={0.35}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={paperMarked ? 1 : 0.5}
+            />
+            {b && (
+              <rect
+                x={b[0] - 1}
+                y={b[1] - 1}
+                width={b[2] - b[0] + 2}
+                height={b[3] - b[1] + 2}
+                fill="transparent"
+                stroke={drag ? "var(--color-accent)" : "none"}
+                strokeWidth={0.5}
+                strokeDasharray="2 1.5"
+                className="cursor-move hover:stroke-[var(--color-accent)]"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  setDrag({ start: toMachine(e), dx: 0, dy: 0 });
+                }}
+                onPointerMove={(e) => {
+                  if (!drag) return;
+                  setDrag({ ...drag, ...paperDelta(drag.start, toMachine(e)) });
+                }}
+                onPointerUp={() => {
+                  if (!drag) return;
+                  if (Math.abs(drag.dx) + Math.abs(drag.dy) > 0.2) {
+                    setPending({ dx: drag.dx, dy: drag.dy });
+                    onMoveDrawing(drag.dx, drag.dy);
+                  }
+                  setDrag(null);
+                }}
+                onClick={(e) => e.stopPropagation()}
+              />
+            )}
+          </g>
         </g>
 
         {tl && <CornerMark x={tl.x} y={H - tl.y} label="top-left" />}

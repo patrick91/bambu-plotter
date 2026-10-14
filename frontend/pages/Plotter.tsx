@@ -4,13 +4,14 @@ import { ArrowUpToLine, Camera, CircleAlert, CircleCheck, Info, PenLine, Play, S
 import { useEffect, useState } from "react";
 
 import { BedView, isBusy } from "@/components/bed-view";
-import { DesignPanel } from "@/components/design-panel";
+import { DesignPanel, useDesign } from "@/components/design-panel";
 import { SetupSteps } from "@/components/steps";
 import { act, Button, formatDuration, Instruction } from "@/components/ui";
 import type { PageProps, PrinterState } from "@/types";
 
 export default function Plotter(props: PageProps) {
   const { printer, preview } = props;
+  const [design, updateDesign] = useDesign(props.design);
   usePoll(isBusy(printer) ? 700 : 1500, { only: ["printer"] });
 
   return (
@@ -38,14 +39,18 @@ export default function Plotter(props: PageProps) {
           <div>
             <h2 className="mb-3 text-xs font-semibold tracking-wider text-muted uppercase">What to draw</h2>
             <div className="rounded-xl border border-line bg-surface p-4">
-              <DesignPanel props={props} />
+              <DesignPanel props={props} design={design} update={updateDesign} />
             </div>
           </div>
         </div>
 
         <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
           <div className="rounded-xl border border-line bg-surface p-4">
-            <BedView printer={printer} preview={preview} />
+            <BedView
+              printer={printer}
+              preview={preview}
+              onMoveDrawing={(dx, dy) => updateDesign({ offset_x: round1(design.offset_x + dx), offset_y: round1(design.offset_y + dy) })}
+            />
             <div className="mt-3 flex justify-end border-t border-line pt-3">
               <Button onClick={() => act("/pen/lift")} disabled={!printer.connected || printer.job?.status === "stopping"}>
                 <ArrowUpToLine className="size-4" /> {isBusy(printer) ? "Stop and lift pen" : "Lift pen"}
@@ -147,7 +152,7 @@ function PlotPanel({ props }: { props: PageProps }) {
       {preview.error && <p className="mb-3 text-sm text-danger">{preview.error}</p>}
       {preview.overflow && (
         <div className="mb-3">
-          <Instruction tone="warn">The drawing runs past the bottom of the paper. Make the letters smaller or the text shorter.</Instruction>
+          <Instruction tone="warn">Part of the drawing is off the paper, and that part won't be drawn. Make it smaller, or move it back onto the paper.</Instruction>
         </div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -288,3 +293,5 @@ function CameraPanel({ enabled }: { enabled: boolean }) {
     </div>
   );
 }
+
+const round1 = (v: number) => Math.round(v * 10) / 10;

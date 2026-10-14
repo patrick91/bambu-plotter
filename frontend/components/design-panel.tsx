@@ -1,6 +1,6 @@
 import { router } from "@inertiajs/react";
 import clsx from "clsx";
-import { Dices, ImageUp, Type, Upload } from "lucide-react";
+import { Dices, ImageUp, RotateCcw, RotateCw, Type, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { Design, PageProps } from "@/types";
@@ -9,24 +9,39 @@ import { Field, inputClass } from "./ui";
 
 const DESIGN_PROPS = ["design", "preview", "notice"];
 
-export function DesignPanel({ props }: { props: PageProps }) {
-  const [design, setDesign] = useState<Design>(props.design);
+export type UpdateDesign = (patch: Partial<Design>) => void;
+
+/** The drawing being edited, shared by the side panel and the bed view. */
+export function useDesign(server: Design): [Design, UpdateDesign] {
+  const [design, setDesign] = useState<Design>(server);
+  const latest = useRef(design);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const fileInput = useRef<HTMLInputElement>(null);
 
   // Pick up changes made on the server (new poem, upload switching tabs).
-  const serverKey = `${props.design.kind}|${props.design.text}|${props.design.upload_name}`;
-  useEffect(() => setDesign(props.design), [serverKey]);
+  const serverKey = `${server.kind}|${server.text}|${server.upload_name}`;
+  useEffect(() => {
+    latest.current = server;
+    setDesign(server);
+  }, [serverKey]);
 
   function update(patch: Partial<Design>) {
-    const next = { ...design, ...patch };
+    const next = { ...latest.current, ...patch };
+    latest.current = next;
     setDesign(next);
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {
-      const { upload_name, ...body } = next;
+      const { upload_name, ...body } = latest.current;
       router.post("/design", body, { preserveScroll: true, preserveState: true, only: DESIGN_PROPS });
     }, 250);
   }
+
+  return [design, update];
+}
+
+const TONAL = ["spiral", "circles", "squiggle", "crosshatch"];
+
+export function DesignPanel({ props, design, update }: { props: PageProps; design: Design; update: UpdateDesign }) {
+  const fileInput = useRef<HTMLInputElement>(null);
 
   function upload(file: File) {
     router.post("/design/upload", { file }, { forceFormData: true, preserveScroll: true, preserveState: true, only: DESIGN_PROPS });
@@ -127,15 +142,44 @@ export function DesignPanel({ props }: { props: PageProps }) {
           {design.kind === "image" && (
             <div className="grid grid-cols-2 gap-3">
               <Field label="Draw">
-                <select className={inputClass} value={design.image_mode} onChange={(e) => update({ image_mode: e.target.value as Design["image_mode"] })}>
-                  <option value="outline">Outlines of dark areas</option>
-                  <option value="fill">Outlines + shading</option>
-                  <option value="edges">Edges (for photos)</option>
+                <select
+                  className={inputClass}
+                  value={design.image_mode}
+                  onChange={(e) => {
+                    const image_mode = e.target.value as Design["image_mode"];
+                    // Shading styles look best with wider line spacing than hatching.
+                    const spacing = TONAL.includes(image_mode) && !TONAL.includes(design.image_mode) ? 1.2 : design.spacing;
+                    update({ image_mode, spacing });
+                  }}
+                >
+                  <optgroup label="Shading (best for photos)">
+                    <option value="spiral">Spiral</option>
+                    <option value="circles">Circles</option>
+                    <option value="squiggle">Squiggle lines</option>
+                    <option value="crosshatch">Crosshatching</option>
+                  </optgroup>
+                  <optgroup label="Tracing (best for logos and drawings)">
+                    <option value="outline">Outlines of dark areas</option>
+                    <option value="fill">Outlines + fill</option>
+                    <option value="edges">Edges</option>
+                  </optgroup>
                 </select>
               </Field>
-              <Range label="Darkness cut-off" min={10} max={245} step={5} value={design.threshold} onChange={(threshold) => update({ threshold })} />
-              {design.image_mode === "fill" && (
-                <Range label="Shading lines every" unit="mm" min={0.4} max={3} step={0.1} value={design.spacing} onChange={(spacing) => update({ spacing })} />
+              {TONAL.includes(design.image_mode) ? (
+                <Range label="Lighten" unit="×" min={0.5} max={3} step={0.1} value={design.gamma} onChange={(gamma) => update({ gamma })} />
+              ) : (
+                <Range label="Darkness cut-off" min={10} max={245} step={5} value={design.threshold} onChange={(threshold) => update({ threshold })} />
+              )}
+              {(design.image_mode === "fill" || TONAL.includes(design.image_mode)) && (
+                <Range
+                  label={TONAL.includes(design.image_mode) ? "Lines every" : "Fill lines every"}
+                  unit="mm"
+                  min={0.4}
+                  max={4}
+                  step={0.1}
+                  value={design.spacing}
+                  onChange={(spacing) => update({ spacing })}
+                />
               )}
               <label className="col-span-2 flex items-center gap-2 text-sm">
                 <input type="checkbox" checked={design.invert} onChange={(e) => update({ invert: e.target.checked })} />
@@ -153,6 +197,35 @@ export function DesignPanel({ props }: { props: PageProps }) {
       )}
 
       <Range label="Margin" unit="mm" min={0} max={30} step={1} value={design.margin} onChange={(margin) => update({ margin })} />
+
+      <div className="space-y-3 border-t border-line pt-4">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold tracking-wider text-muted uppercase">Position</span>
+          <button
+            type="button"
+            className="text-xs text-muted hover:text-ink disabled:opacity-40"
+            disabled={!design.rotation && design.scale === 100 && !design.offset_x && !design.offset_y}
+            onClick={() => update({ rotation: 0, scale: 100, offset_x: 0, offset_y: 0 })}
+          >
+            Reset
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Range label="Size" unit="%" min={10} max={300} step={5} value={design.scale} onChange={(scale) => update({ scale })} />
+          <div>
+            <Range label="Rotation" unit="°" min={-180} max={180} step={1} value={design.rotation} onChange={(rotation) => update({ rotation })} />
+            <div className="mt-1 flex gap-1">
+              <button type="button" className="rounded-md bg-sunken px-2 py-0.5 text-xs text-muted hover:text-ink" onClick={() => update({ rotation: wrap(design.rotation - 90) })}>
+                <RotateCcw className="inline size-3" /> 90°
+              </button>
+              <button type="button" className="rounded-md bg-sunken px-2 py-0.5 text-xs text-muted hover:text-ink" onClick={() => update({ rotation: wrap(design.rotation + 90) })}>
+                <RotateCw className="inline size-3" /> 90°
+              </button>
+            </div>
+          </div>
+        </div>
+        <p className="text-xs text-muted">Drag the drawing on the bed picture to move it around the paper.</p>
+      </div>
     </div>
   );
 }
@@ -195,3 +268,6 @@ function Range({
     </label>
   );
 }
+
+/** Keep angles in -180..180, so the slider can show them. */
+const wrap = (deg: number) => ((((deg + 180) % 360) + 360) % 360) - 180;
