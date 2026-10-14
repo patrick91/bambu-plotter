@@ -28,11 +28,18 @@ STALE_AFTER = 15.0
 
 Z_SPEED = 900.0
 
+# How many chunks of a plot can be queued on the printer at once.
+MAX_IN_FLIGHT = 4
+
+# An A1 mini answers "success" to bigger gcode_line messages but never runs
+# them: 1.9 KB worked, 2.9 KB was silently dropped. Stay well under that.
+MAX_MESSAGE_BYTES = 1500
+
 
 @dataclass
 class Chunk:
     lines: list[str]
-    # Where the pen is (lifted) once the chunk has run.
+    # Where the pen is once the chunk has run.
     end: tuple[float, float]
 
 
@@ -64,6 +71,10 @@ class Printer:
         self.z: float | None = None
         self.xy_homed = False
         self.z_zeroed = False
+
+        self._sequence = 0
+        # The printer's replies to gcode_line commands, by sequence id.
+        self._replies: dict[str, dict] = {}
 
         self.job: Job | None = None
         self._stop_job = threading.Event()
@@ -153,6 +164,13 @@ class Printer:
         report = payload.get("print")
         if not isinstance(report, dict):
             return
+        if report.get("command") == "gcode_line":
+            # The printer's answer to a batch of G-code we sent.
+            print(
+                f"Printer replied to G-code #{report.get('sequence_id')}: {report.get('result')} {report.get('reason', '')}"
+            )
+            self._replies[str(report.get("sequence_id"))] = report
+            return
         with self._lock:
             # Reports are sparse deltas: merge them into what we've seen.
             self._report.update(report)
@@ -169,16 +187,30 @@ class Printer:
             return
         self._publish({"pushing": {"sequence_id": "0", "command": "pushall"}})
 
-    def send(self, *lines: str) -> None:
+    def send(self, *lines: str) -> str:
+        """Send G-code lines in one message. Returns its sequence id."""
         if not self.connected:
             raise PrinterError("Not connected to the printer")
+        param = "\n".join(lines) + "\n"
+        if len(param.encode()) > MAX_MESSAGE_BYTES:
+            raise PrinterError(f"G-code message too big for the printer ({len(param)} bytes)")
         if FAKE:
             print("G-code >", " | ".join(lines[:6]), "..." if len(lines) > 6 else "")
             # Echo progress markers back after a moment, like the printer does.
             for marker in re.findall(r"^M73 P(\d+)", "\n".join(lines), re.MULTILINE):
                 threading.Timer(0.6, lambda m=marker: self._report.update(mc_percent=int(m))).start()
-            return
-        self._publish({"print": {"sequence_id": "0", "command": "gcode_line", "param": "\n".join(lines) + "\n"}})
+            return ""
+        self._sequence += 1
+        sequence_id = str(self._sequence)
+        self._publish({"print": {"sequence_id": sequence_id, "command": "gcode_line", "param": param}})
+        return sequence_id
+
+    def rejection(self, sequence_id: str) -> str | None:
+        """Why the printer refused a batch, if it did."""
+        reply = self._replies.get(sequence_id)
+        if reply is None or reply.get("result", "").lower() in ("success", "ok", ""):
+            return None
+        return reply.get("reason") or reply.get("result") or "unknown reason"
 
     @property
     def report(self) -> dict:
@@ -283,16 +315,17 @@ class Printer:
             return None
 
     def _run_job(self, job: Job, chunks: list[Chunk]) -> None:
-        """Feed the printer a couple of chunks at a time.
+        """Feed the printer a few chunks at a time.
 
         Each chunk ends with an `M73 P<n>` progress marker, which the printer
         echoes back as `mc_percent` in its status report once it reaches it.
-        Keeping two chunks queued means the printer never waits on us, while
-        a stop takes effect within a couple of chunks.
+        Keeping a few chunks queued means the printer never waits on us, while
+        a stop takes effect within a few chunks.
         """
         first = (self._marker() or 0) + 1
         markers = [(first + i) % 99 + 1 for i in range(len(chunks))]
         in_flight: list[int] = []  # chunk indexes sent but not confirmed
+        sequence_ids: dict[int, str] = {}
         sent = 0
         last_progress = time.time()
         last_poll = 0.0
@@ -317,20 +350,28 @@ class Printer:
                 if sent == len(chunks) and not in_flight:
                     break
 
-                if not self._stop_job.is_set() and sent < len(chunks) and len(in_flight) < 2:
+                for index in in_flight:
+                    if reason := self.rejection(sequence_ids[index]):
+                        raise PrinterError(f"The printer refused the drawing commands: {reason}")
+
+                if not self._stop_job.is_set() and sent < len(chunks) and len(in_flight) < MAX_IN_FLIGHT:
                     is_last = sent == len(chunks) - 1
                     # Only the last chunk waits for motion before its marker, so
                     # the job reads as done when the pen has actually stopped.
                     tail = ["M400"] if is_last else []
-                    self.send(*chunks[sent].lines, *tail, f"M73 P{markers[sent]} R0")
+                    sequence_ids[sent] = self.send(*chunks[sent].lines, *tail, f"M73 P{markers[sent]} R0")
                     in_flight.append(sent)
                     sent += 1
                     continue
 
                 if not self.connected:
                     raise PrinterError("Lost connection to the printer mid-plot")
-                if time.time() - last_progress > 120:
-                    raise PrinterError("The printer stopped reporting progress")
+                if time.time() - last_progress > 60:
+                    raise PrinterError(
+                        "The printer accepted the drawing commands but isn't running them"
+                        if job.done_lines == 0
+                        else "The printer stopped reporting progress"
+                    )
 
                 # Status reports come every few seconds on their own; ask for
                 # them more often so progress shows up promptly.

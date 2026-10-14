@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 
 from app import design, plot
+from app.printer import MAX_MESSAGE_BYTES
 from app.settings import Point, Settings
 
 
@@ -44,20 +45,22 @@ def test_paper_top_facing_back_of_printer():
     assert to_bed(10, 10) == (30, 150)
 
 
-def test_chunks_end_with_pen_up():
+def test_chunks_fit_in_a_message_and_stay_on_paper():
     s = Settings(paper_top_left=Point(x=20, y=160), paper_bottom_right=Point(x=125, y=12))
+    # Lots of short strokes and one very long one, which has to be split.
     strokes = [[(i / 2, 0.0), (i / 2, 10.0)] for i in range(200)]
+    strokes.append([(50 + 40 * np.cos(t / 50), 70 + 40 * np.sin(t / 50)) for t in range(400)])
     chunks = plot.gcode_chunks(plot.order(strokes), s)
     assert len(chunks) > 1
     for chunk in chunks:
-        assert chunk.lines[-1] == f"G1 Z{s.pen_up:.2f} F900"
-    # Nothing ever leaves the paper.
-    for chunk in chunks:
-        for line in chunk.lines:
-            if line.startswith(("G0", "G1")) and " X" in line:
-                x = float(line.split(" X")[1].split()[0])
-                y = float(line.split(" Y")[1].split()[0])
-                assert 20 <= x <= 125 and 12 <= y <= 160
+        assert len("\n".join(chunk.lines)) + plot.MARKER_BYTES <= MAX_MESSAGE_BYTES
+    lines = [line for chunk in chunks for line in chunk.lines]
+    assert lines[-1] == f"G1 Z{s.pen_up:.2f} F900"
+    for line in lines:
+        if " X" in line:
+            x = float(line.split(" X")[1].split()[0])
+            y = float(line.split(" Y")[1].split()[0])
+            assert 20 <= x <= 125 and 12 <= y <= 160
 
 
 def test_clip_drops_what_is_off_the_paper():

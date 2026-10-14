@@ -6,12 +6,11 @@ import math
 import numpy as np
 
 from .design import Stroke
-from .printer import Z_SPEED, Chunk
+from .printer import MAX_MESSAGE_BYTES, Z_SPEED, Chunk
 from .settings import Point, Settings
 
-# Lines per MQTT message. Small enough that stopping is quick, big enough that
-# the printer never runs dry between messages.
-CHUNK_LINES = 150
+# Room left in each message for the progress marker the runner appends.
+MARKER_BYTES = 64
 
 
 def bounds(strokes: list[Stroke]) -> tuple[float, float, float, float]:
@@ -124,27 +123,43 @@ def paper_to_machine(top_left: Point, bottom_right: Point):
 
 
 def gcode_chunks(strokes: list[Stroke], settings: Settings) -> list[Chunk]:
+    """G-code for the strokes, split into messages small enough for the printer.
+
+    A long stroke can be split across messages: the printer runs them back
+    to back, so the pen just keeps drawing.
+    """
     assert settings.paper_top_left and settings.paper_bottom_right
     to_bed = paper_to_machine(settings.paper_top_left, settings.paper_bottom_right)
     up, down = settings.pen_up, -settings.pen_pressure
 
-    chunks: list[Chunk] = []
-    current: list[str] = ["G90", f"G1 Z{up:.2f} F{Z_SPEED:.0f}"]
-    end = (0.0, 0.0)
+    # Each line with where the pen is once it has run.
+    lines: list[tuple[str, tuple[float, float]]] = []
+    pos = (0.0, 0.0)
+    lines += [("G90", pos), (f"G1 Z{up:.2f} F{Z_SPEED:.0f}", pos)]
     for stroke in strokes:
         points = [to_bed(x, y) for x, y in stroke]
-        x, y = points[0]
-        current += [
-            f"G0 X{x:.2f} Y{y:.2f} F{settings.travel_speed:.0f}",
-            f"G1 Z{down:.2f} F{Z_SPEED:.0f}",
-        ]
-        current += [f"G1 X{x:.2f} Y{y:.2f} F{settings.draw_speed:.0f}" for x, y in points[1:]]
-        current.append(f"G1 Z{up:.2f} F{Z_SPEED:.0f}")
-        end = points[-1]
-        # Only break between strokes, so every chunk ends with the pen up.
-        if len(current) >= CHUNK_LINES:
+        pos = points[0]
+        # G1 rather than G0 for travel, like Bambu Studio's own G-code.
+        lines.append((f"G1 X{pos[0]:.2f} Y{pos[1]:.2f} F{settings.travel_speed:.0f}", pos))
+        lines.append((f"G1 Z{down:.2f} F{Z_SPEED:.0f}", pos))
+        for i, pos in enumerate(points[1:]):
+            # Feed rate is sticky, so only the first drawing move needs it.
+            feed = f" F{settings.draw_speed:.0f}" if i == 0 else ""
+            lines.append((f"G1 X{pos[0]:.2f} Y{pos[1]:.2f}{feed}", pos))
+        lines.append((f"G1 Z{up:.2f} F{Z_SPEED:.0f}", pos))
+
+    budget = MAX_MESSAGE_BYTES - MARKER_BYTES
+    chunks: list[Chunk] = []
+    current: list[str] = []
+    size = 0
+    end = pos
+    for line, after in lines:
+        if current and size + len(line) + 1 > budget:
             chunks.append(Chunk(current, end))
-            current = []
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+        end = after
     if current:
         chunks.append(Chunk(current, end))
     return chunks
