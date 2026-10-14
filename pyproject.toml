@@ -1,0 +1,24 @@
+[project]
+name = "bambu-plotter"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "cross-inertia>=0.22.0",
+    "fastapi[standard]>=0.143.1",
+    "hershey-fonts>=2.1.0",
+    "numpy>=2.5.4",
+    "opencv-python-headless>=5.0.0.93",
+    "paho-mqtt>=2.1.0",
+    "svgelements>=1.9.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
