@@ -23,6 +23,29 @@ terminal instead of being sent:
 BAMBU_PLOTTER_FAKE=1 uv run fastapi dev app/main.py
 ```
 
+## NixOS
+
+The flake has a package and a module:
+
+```nix
+# flake.nix inputs
+bambu-plotter.url = "github:patrick91/bambu-plotter";
+
+# configuration
+imports = [ bambu-plotter.nixosModules.default ];
+services.bambu-plotter = {
+  enable = true;
+  port = 8002; # listens on 127.0.0.1; put a proxy in front
+};
+```
+
+The page has no login and moves your printer, so keep it off the internet.
+Settings live in `/var/lib/bambu-plotter`.
+
+Python dependencies come from `uv.lock`. Frontend dependencies come from
+`bun.nix`, which `bun install` regenerates from `bun.lock`; commit it with the
+lock file.
+
 ## The printer
 
 - Turn on **LAN Only mode** and **Developer mode** on the printer. The IP
