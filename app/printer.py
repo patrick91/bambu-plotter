@@ -271,8 +271,6 @@ class Printer:
     def jog_z(self, dz: float) -> None:
         self._check_idle()
         # Relative, so it's safe even before we know where Z is.
-        if self.z is not None and self.z + dz < -2:
-            raise PrinterError("That would push the pen too far into the paper")
         self.send("G91", f"G1 Z{dz:.2f} F{Z_SPEED:.0f}", "G90")
         if self.z is not None:
             self.z += dz
