@@ -35,6 +35,8 @@ PAPER_SIZES = {
 class Design(BaseModel):
     kind: Literal["text", "image", "svg"] = "text"
     text: str = design.random_poem()
+    # The text with its styling. Without it, `text` is drawn all in `font` and `size`.
+    doc: list[design.Paragraph] | None = None
     font: str = "scripts"
     size: float = 5.0
     line_spacing: float = 1.6
@@ -105,16 +107,18 @@ def paper_size() -> tuple[float, float]:
     return DEFAULT_PAPER
 
 
-def strokes_on_paper() -> tuple[list[design.Stroke], bool]:
+def strokes_on_paper() -> tuple[list[design.Stroke], bool, dict | None]:
     """The current design on the paper, ordered for drawing.
 
-    Also says whether some of it was cut off for being outside the paper.
+    Also says whether some of it was cut off for being outside the paper, and
+    how it was moved there: the page draws handles from that, and shifts the
+    preview to follow them until a new one arrives.
     """
     d = state.design
     paper_w, paper_h = paper_size()
     placed = laid_out(paper_w, paper_h)
     if not placed:
-        return [], False
+        return [], False, None
     scale = d.scale / 100
     if d.kind != "text":
         # At 100% a picture fills the paper whichever way it's turned. Text
@@ -126,7 +130,15 @@ def strokes_on_paper() -> tuple[list[design.Stroke], bool]:
     moved = plot.transform(placed, rotation=d.rotation, scale=scale, offset=(d.offset_x, d.offset_y))
     x0, y0, x1, y1 = plot.bounds(moved)
     overflow = x0 < -0.5 or y0 < -0.5 or x1 > paper_w + 0.5 or y1 > paper_h + 0.5
-    return plot.order(plot.clip(moved, paper_w, paper_h)), overflow
+    frame = {
+        "box": plot.bounds(placed),
+        "scale": scale,
+        # How much smaller than asked it had to be to fit, for pictures.
+        "fit": scale / (d.scale / 100),
+        "rotation": d.rotation,
+        "offset": (d.offset_x, d.offset_y),
+    }
+    return plot.order(plot.clip(moved, paper_w, paper_h)), overflow, frame
 
 
 def laid_out(paper_w: float, paper_h: float) -> list[design.Stroke]:
@@ -139,12 +151,11 @@ def laid_out(paper_w: float, paper_h: float) -> list[design.Stroke]:
     room_w, room_h = paper_w - 2 * d.margin, paper_h - 2 * d.margin
     if d.kind == "text":
         strokes = design.text_strokes(
-            d.text,
+            d.doc if d.doc is not None else design.plain_paragraphs(d.text, d.align),
             font=d.font,
             size=d.size,
             max_width=room_w,
             line_spacing=d.line_spacing,
-            align=d.align,
         )
         # Text keeps the size asked for, starting at the top-left margin.
         placed = [[(x + d.margin, y + d.margin) for x, y in s] for s in strokes]
@@ -176,7 +187,7 @@ def laid_out(paper_w: float, paper_h: float) -> list[design.Stroke]:
 def preview() -> dict:
     paper_w, paper_h = paper_size()
     try:
-        strokes, overflow = strokes_on_paper()
+        strokes, overflow, frame = strokes_on_paper()
     except Exception as e:  # noqa: BLE001 - show any tracing error next to the design
         return {"d": "", "width": paper_w, "height": paper_h, "error": str(e), "strokes": 0}
     draw, _ = plot.length(strokes)
@@ -189,6 +200,7 @@ def preview() -> dict:
         "draw_mm": round(draw),
         "estimated_seconds": round(plot.estimate_seconds(strokes, printer.settings)),
         "overflow": overflow,
+        "frame": frame,
         "error": None,
     }
 
@@ -373,14 +385,14 @@ def save_settings(body: PenSettings):
 
 @app.post("/design")
 def update_design(body: Design):
-    state.design = body
+    state.design = body.model_copy(update={"text": body.text.replace("\r\n", "\n")})
     state.save_design()
     return back()
 
 
 @app.post("/design/poem")
 def new_poem():
-    state.design = state.design.model_copy(update={"kind": "text", "text": design.random_poem()})
+    state.design = state.design.model_copy(update={"kind": "text", "text": design.random_poem(), "doc": None})
     state.save_design()
     return back()
 
@@ -409,7 +421,7 @@ def plot_start():
     s = printer.settings
     if not (s.paper_top_left and s.paper_bottom_right):
         return back("error", "Mark the paper first")
-    strokes, _ = strokes_on_paper()
+    strokes, _, _ = strokes_on_paper()
     if not strokes:
         return back("error", "There's nothing to draw yet")
     name = state.upload_name if state.design.kind != "text" else state.design.text.strip().split("\n")[0][:40]

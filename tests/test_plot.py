@@ -6,11 +6,40 @@ from app.printer import MAX_MESSAGE_BYTES
 from app.settings import Point, Settings
 
 
+def text(t: str, **style) -> list[design.Paragraph]:
+    return [design.Paragraph(runs=[design.Run(text=t, **style)])]
+
+
 def test_text_wraps_to_width():
-    strokes = design.text_strokes("hello " * 40, font="futural", size=5, max_width=80)
+    strokes = design.text_strokes(design.plain_paragraphs("hello " * 40), font="futural", size=5, max_width=80)
     _x0, _y0, x1, y1 = plot.bounds(strokes)
     assert x1 <= 80.5
     assert y1 > 20  # wrapped onto several lines
+
+
+def test_curly_quotes_are_drawn():
+    straight = design.text_strokes(text("it's"), font="futural", size=5, max_width=80)
+    curly = design.text_strokes(text("it’s"), font="futural", size=5, max_width=80)
+    assert curly == straight
+
+
+def test_bold_goes_over_letters_twice():
+    plain = design.text_strokes(text("Hi"), font="futural", size=5, max_width=80)
+    bold = design.text_strokes(text("Hi", bold=True), font="futural", size=5, max_width=80)
+    assert len(bold) == 2 * len(plain)
+
+
+def test_underline_is_one_line_per_line_of_text():
+    plain = design.text_strokes(text("a few words"), font="futural", size=5, max_width=80)
+    underlined = design.text_strokes(text("a few words", underline=True), font="futural", size=5, max_width=80)
+    assert len(underlined) == len(plain) + 1
+
+
+def test_mixed_sizes_share_a_baseline():
+    para = design.Paragraph(runs=[design.Run(text="I", size=10), design.Run(text="I", size=5)])
+    strokes = design.text_strokes([para], font="futural", size=5, max_width=80)
+    big, small = strokes[0], strokes[1]
+    assert abs(max(y for _, y in big) - max(y for _, y in small)) < 0.01
 
 
 def test_svg_units_are_mm():

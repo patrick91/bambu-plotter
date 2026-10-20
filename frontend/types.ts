@@ -27,13 +27,20 @@ export type PrinterState = {
   job: Job | null;
 };
 
+export type Align = "left" | "center" | "right";
+
+/** A stretch of text in one style. No font or size means the design's own. */
+export type Run = { text: string; font: string | null; size: number | null; bold: boolean; italic: boolean; underline: boolean };
+export type Paragraph = { align: Align; runs: Run[] };
+
 export type Design = {
   kind: "text" | "image" | "svg";
   text: string;
+  doc: Paragraph[] | null;
   font: string;
   size: number;
   line_spacing: number;
-  align: "left" | "center" | "right";
+  align: Align;
   margin: number;
   fit: boolean;
   image_mode: "outline" | "fill" | "edges" | "spiral" | "circles" | "squiggle" | "crosshatch";
@@ -57,6 +64,8 @@ export type Preview = {
   draw_mm?: number;
   estimated_seconds?: number;
   overflow?: boolean;
+  /** How the drawing was put on the paper: turned and scaled around the middle of `box`, then moved. */
+  frame?: { box: [number, number, number, number]; scale: number; fit: number; rotation: number; offset: [number, number] } | null;
   error: string | null;
 };
 

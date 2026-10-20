@@ -1,10 +1,11 @@
 import { router } from "@inertiajs/react";
 import clsx from "clsx";
-import { Dices, ImageUp, RotateCcw, RotateCw, Type, Upload } from "lucide-react";
+import { ImageUp, RotateCcw, RotateCw, Type, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { Design, PageProps } from "@/types";
 
+import { TextEditor } from "./text-editor";
 import { Field, inputClass } from "./ui";
 
 const DESIGN_PROPS = ["design", "preview", "notice"];
@@ -16,10 +17,14 @@ export function useDesign(server: Design): [Design, UpdateDesign] {
   const [design, setDesign] = useState<Design>(server);
   const latest = useRef(design);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const sent = useRef<Design | null>(null);
 
-  // Pick up changes made on the server (new poem, upload switching tabs).
-  const serverKey = `${server.kind}|${server.text}|${server.upload_name}`;
+  // Pick up changes made on the server (new poem, upload switching tabs), but
+  // not the server echoing back what we sent: there may be newer typing since.
+  const serverKey = `${server.kind}|${server.text}|${JSON.stringify(server.doc)}|${server.upload_name}`;
   useEffect(() => {
+    const echo = sent.current && server.kind === sent.current.kind && server.text === sent.current.text && JSON.stringify(server.doc) === JSON.stringify(sent.current.doc) && server.upload_name === latest.current.upload_name;
+    if (echo) return;
     latest.current = server;
     setDesign(server);
   }, [serverKey]);
@@ -30,6 +35,7 @@ export function useDesign(server: Design): [Design, UpdateDesign] {
     setDesign(next);
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {
+      sent.current = latest.current;
       const { upload_name, ...body } = latest.current;
       router.post("/design", body, { preserveScroll: true, preserveState: true, only: DESIGN_PROPS });
     }, 250);
@@ -73,41 +79,12 @@ export function DesignPanel({ props, design, update }: { props: PageProps; desig
 
       {design.kind === "text" ? (
         <div className="space-y-3">
-          <div className="relative">
-            <textarea
-              className={clsx(inputClass, "min-h-56 resize-y font-serif leading-relaxed")}
-              value={design.text}
-              onChange={(e) => update({ text: e.target.value })}
-              placeholder="Write a letter, a poem, a shopping list…"
-            />
-            <button
-              type="button"
-              onClick={() => router.post("/design/poem", {}, { preserveScroll: true, preserveState: true, only: DESIGN_PROPS })}
-              className="absolute right-2 bottom-3 inline-flex items-center gap-1 rounded-md bg-sunken px-2 py-1 text-xs text-muted hover:text-ink"
-            >
-              <Dices className="size-3.5" /> Random poem
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Font">
-              <select className={inputClass} value={design.font} onChange={(e) => update({ font: e.target.value })}>
-                {Object.entries(props.fonts).map(([key, label]) => (
-                  <option key={key} value={key}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Alignment">
-              <select className={inputClass} value={design.align} onChange={(e) => update({ align: e.target.value as Design["align"] })}>
-                <option value="left">Left</option>
-                <option value="center">Centre</option>
-                <option value="right">Right</option>
-              </select>
-            </Field>
-            <Range label="Letter size" unit="mm" min={2} max={15} step={0.5} value={design.size} onChange={(size) => update({ size })} />
-            <Range label="Line spacing" unit="×" min={1} max={3} step={0.1} value={design.line_spacing} onChange={(line_spacing) => update({ line_spacing })} />
-          </div>
+          <TextEditor design={design} update={update} fonts={props.fonts} />
+          <p className="text-xs text-muted">
+            Select words to change their font and size. The editor uses lookalike fonts; the paper on the right shows exactly what
+            the pen will draw.
+          </p>
+          <Range label="Line spacing" unit="×" min={1} max={3} step={0.1} value={design.line_spacing} onChange={(line_spacing) => update({ line_spacing })} />
         </div>
       ) : (
         <div className="space-y-3">

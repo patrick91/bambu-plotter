@@ -4,8 +4,10 @@ Turn a Bambu Lab printer into a pen plotter, with a page that tells you what to
 do at each step: when to put the pen in, how to set its height, and where the
 paper is on the bed.
 
-Draw handwritten-style text (letters, poems), trace PNG/JPEG images, or plot
-SVGs.
+Draw handwritten-style text (letters, poems) with a font, size and bold,
+italic or underline for each word, trace PNG/JPEG images, or plot SVGs. The
+paper preview shows exactly what the pen will draw; drag it to move, resize or
+turn the drawing.
 
 ## Running it
 

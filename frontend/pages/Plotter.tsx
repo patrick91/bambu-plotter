@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { BedView, isBusy } from "@/components/bed-view";
 import { DesignPanel, useDesign } from "@/components/design-panel";
+import { PaperView } from "@/components/paper-view";
 import { SetupSteps } from "@/components/steps";
 import { act, Button, formatDuration, Instruction } from "@/components/ui";
 import type { PageProps, PrinterState } from "@/types";
@@ -12,6 +13,9 @@ import type { PageProps, PrinterState } from "@/types";
 export default function Plotter(props: PageProps) {
   const { printer, preview } = props;
   const [design, updateDesign] = useDesign(props.design);
+  const ready = Boolean(printer.xy_homed && printer.z_zeroed && printer.paper_top_left && printer.paper_bottom_right);
+  // While setting up you need the bed, to move the pen around; after that, the paper.
+  const [view, setView] = useState<"paper" | "bed">(ready ? "paper" : "bed");
   usePoll(isBusy(printer) ? 700 : 1500, { only: ["printer"] });
 
   return (
@@ -46,11 +50,35 @@ export default function Plotter(props: PageProps) {
 
         <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
           <div className="rounded-xl border border-line bg-surface p-4">
-            <BedView
-              printer={printer}
-              preview={preview}
-              onMoveDrawing={(dx, dy) => updateDesign({ offset_x: round1(design.offset_x + dx), offset_y: round1(design.offset_y + dy) })}
-            />
+            <div className="mb-3 flex w-fit rounded-lg bg-sunken p-1">
+              {(
+                [
+                  ["paper", "Paper"],
+                  ["bed", "Printer bed"],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setView(key)}
+                  className={clsx(
+                    "rounded-md px-3 py-1 text-sm font-medium transition-colors",
+                    view === key ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {view === "paper" ? (
+              <PaperView design={design} update={updateDesign} preview={preview} />
+            ) : (
+              <BedView
+                printer={printer}
+                preview={preview}
+                onMoveDrawing={(dx, dy) => updateDesign({ offset_x: round1(design.offset_x + dx), offset_y: round1(design.offset_y + dy) })}
+              />
+            )}
             <div className="mt-3 flex justify-end border-t border-line pt-3">
               <Button onClick={() => act("/pen/lift")} disabled={!printer.connected || printer.job?.status === "stopping"}>
                 <ArrowUpToLine className="size-4" /> {isBusy(printer) ? "Stop and lift pen" : "Lift pen"}

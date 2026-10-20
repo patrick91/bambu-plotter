@@ -4,13 +4,17 @@ Everything here returns strokes: lists of (x, y) points in millimetres, with
 the origin at the top-left and y pointing down, like on paper.
 """
 
+import functools
 import io
 import random
+from dataclasses import dataclass
+from typing import Literal
 
 import cv2
 import numpy as np
 import svgelements
 from HersheyFonts import HersheyFonts
+from pydantic import BaseModel
 
 type Stroke = list[tuple[float, float]]
 
@@ -40,49 +44,161 @@ def random_poem() -> str:
     return random.choice(POEMS)
 
 
+# Typographic characters the fonts don't have, drawn as ones they do.
+SUBSTITUTES = {"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-", "\t": " ", "\u00a0": " "}
+
+# How far a letter moves the pen along, and its strokes.
+type Glyph = tuple[float, list[Stroke]]
+
+
+class Run(BaseModel):
+    """A stretch of text in one style. No font or size means the design's own."""
+
+    text: str
+    font: str | None = None
+    size: float | None = None
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+
+
+class Paragraph(BaseModel):
+    align: Literal["left", "center", "right"] = "left"
+    runs: list[Run] = []
+
+
+def plain_paragraphs(text: str, align: Literal["left", "center", "right"] = "left") -> list[Paragraph]:
+    return [Paragraph(align=align, runs=[Run(text=line)] if line else []) for line in text.split("\n")]
+
+
+@dataclass(frozen=True)
+class Font:
+    glyphs: dict[str, Glyph]
+    # Where letters sit, as a fraction of their height from the top.
+    baseline: float
+
+
+@functools.cache
+def load_font(name: str) -> Font:
+    """A font scaled for 1 mm tall letters, with y down from the top of the letter."""
+    f = HersheyFonts()
+    f.load_default_font(name if name in FONTS else "scripts")
+    top, base, bottom = f.render_options.cap_line, f.render_options.base_line, f.render_options.bottom_line
+    scale = 1 / (bottom - top)
+    glyphs: dict[str, Glyph] = {}
+    for char, g in f.all_glyphs.items():
+        strokes = [[((x - g.left_offset) * scale, (y - top) * scale) for x, y in stroke] for stroke in g.strokes]
+        glyphs[char] = (g.char_width * scale, strokes)
+    for char, same in SUBSTITUTES.items():
+        glyphs[char] = glyphs[same]
+    return Font(glyphs, (base - top) * scale)
+
+
+@dataclass(frozen=True)
+class _Style:
+    font: Font
+    size: float
+    bold: bool
+    italic: bool
+    underline: bool
+
+    @property
+    def bold_offset(self) -> float:
+        # About a pen's width, so the second pass sits right next to the first.
+        return min(max(self.size * 0.04, 0.25), 0.5) if self.bold else 0.0
+
+    def advance(self, char: str) -> float:
+        glyph = self.font.glyphs.get(char)
+        return glyph[0] * self.size + self.bold_offset if glyph else 0.0
+
+
+ITALIC_SLANT = 0.2
+
+
 def text_strokes(
-    text: str,
+    paragraphs: list[Paragraph],
     *,
     font: str,
     size: float,
     max_width: float,
     line_spacing: float = 1.6,
-    align: str = "left",
 ) -> list[Stroke]:
-    """Lay out text with `size` mm tall letters, wrapping at `max_width` mm."""
-    f = HersheyFonts()
-    f.load_default_font(font if font in FONTS else "scripts")
-    f.normalize_rendering(size)
+    """Lay out styled text, wrapping at `max_width` mm.
 
-    def width(s: str) -> float:
-        xs = [x for stroke in f.strokes_for_text(s) for x, _ in stroke]
-        return max(xs) if xs else 0.0
-
-    lines: list[str] = []
-    for paragraph in text.splitlines():
-        current = ""
-        for word in paragraph.split():
-            candidate = f"{current} {word}".strip()
-            if current and width(candidate) > max_width:
-                lines.append(current)
-                current = word
-            else:
-                current = candidate
-        lines.append(current)
-
+    Letters of different sizes on one line share a baseline, and each line is
+    as tall as its biggest letters. The fonts only come in one weight, so bold
+    goes over each letter twice, a pen's width apart.
+    """
     strokes: list[Stroke] = []
-    line_height = size * line_spacing
-    for i, line in enumerate(lines):
-        baseline = size + i * line_height
-        offset = 0.0
-        if align == "center":
-            offset = (max_width - width(line)) / 2
-        elif align == "right":
-            offset = max_width - width(line)
-        for stroke in f.strokes_for_text(line):
-            # Hershey glyphs have y pointing up.
-            strokes.append([(offset + x, baseline - y) for x, y in stroke])
+    top = 0.0
+    for paragraph in paragraphs:
+        chars: list[tuple[str, _Style]] = []
+        for run in paragraph.runs:
+            style = _Style(load_font(run.font or font), run.size or size, run.bold, run.italic, run.underline)
+            chars += [(c, style) for c in run.text]
+        if not chars:
+            top += size * line_spacing
+            continue
+        for line in _wrap(chars, max_width):
+            visible = _rstrip_spaces(line)
+            width = sum(style.advance(c) for c, style in visible)
+            x = {"center": (max_width - width) / 2, "right": max_width - width}.get(paragraph.align, 0.0)
+            baseline = top + max(style.size * style.font.baseline for _, style in line)
+            underline: list[tuple[float, float, float]] = []
+            for i, (char, style) in enumerate(line):
+                glyph = style.font.glyphs.get(char)
+                if glyph is None:
+                    continue
+                letter_top = baseline - style.size * style.font.baseline
+                for stroke in glyph[1]:
+                    points = [(x + gx * style.size, letter_top + gy * style.size) for gx, gy in stroke]
+                    if style.italic:
+                        points = [(px + (baseline - py) * ITALIC_SLANT, py) for px, py in points]
+                    strokes.append(points)
+                    if style.bold:
+                        strokes.append([(px + style.bold_offset, py) for px, py in points])
+                end = x + style.advance(char)
+                if style.underline and i < len(visible):
+                    if underline and abs(underline[-1][1] - x) < 1e-6:
+                        x0, _, y = underline.pop()
+                        underline.append((x0, end, max(y, baseline + style.size * 0.15)))
+                    else:
+                        underline.append((x, end, baseline + style.size * 0.15))
+                x = end
+            strokes += [[(x0, y), (x1, y)] for x0, x1, y in underline]
+            top += max(style.size for _, style in line) * line_spacing
     return strokes
+
+
+def _wrap(chars: list[tuple[str, _Style]], max_width: float) -> list[list[tuple[str, _Style]]]:
+    """Split a paragraph into lines at spaces. Spaces where it wraps stay at the end of the line before."""
+    lines: list[list[tuple[str, _Style]]] = []
+    line_start, x, has_word = 0, 0.0, False
+    i = 0
+    while i < len(chars):
+        if chars[i][0] == " ":
+            x += chars[i][1].advance(" ")
+            i += 1
+            continue
+        j, word = i, 0.0
+        while j < len(chars) and chars[j][0] != " ":
+            word += chars[j][1].advance(chars[j][0])
+            j += 1
+        if has_word and x + word > max_width:
+            lines.append(chars[line_start:i])
+            line_start, x = i, 0.0
+        x += word
+        has_word = True
+        i = j
+    lines.append(chars[line_start:])
+    return lines
+
+
+def _rstrip_spaces[T](line: list[tuple[str, T]]) -> list[tuple[str, T]]:
+    end = len(line)
+    while end and line[end - 1][0] == " ":
+        end -= 1
+    return line[:end]
 
 
 def svg_strokes(data: bytes) -> list[Stroke]:
